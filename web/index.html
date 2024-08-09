@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="web_test">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png" />
+
+  <title>web_test</title>
+  <link rel="manifest" href="manifest.json">
+
+  <script>
+    // The value below is injected by flutter build, do not touch.
+    const serviceWorkerVersion = null;
+  </script>
+  <!-- This script adds the flutter initialization JS code -->
+  <script src="flutter.js" defer></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js" crossorigin="anonymous" async></script>
+  <script src="ton_webpack/dist/bundle.js"></script>
+</head>
+
+<body>
+  <script type="text/javascript">
+    window.flutterWebRenderer = "html";
+  </script>
+  <script>
+    window.addEventListener('load', function (ev) {
+      // Download main.dart.js
+      _flutter.loader.loadEntrypoint({
+        serviceWorker: {
+          serviceWorkerVersion: serviceWorkerVersion,
+        },
+        onEntrypointLoaded: function (engineInitializer) {
+          engineInitializer.initializeEngine().then(function (appRunner) {
+            appRunner.runApp();
+          });
+        }
+      });
+    });
+  </script>
+  <script>
+    const tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
+      manifestUrl: "https://raw.githubusercontent.com/XaBbl4/pytonconnect/main/pytonconnect-manifest.json",
+    });
+    const ton = window.ton;
+    const jettonWalletCode = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    const jettonWalletAddress = "xxxx-xxxx-xxxx";
+
+    async function connectTonWallet() {
+      try {
+        const wallet = await tonConnectUI.connectWallet();
+        await resetInset();
+        return JSON.stringify(wallet);
+      } catch (error) {
+        await resetInset();
+        throw error;
+      }
+    }
+
+    async function disconnectTonWallet() {
+      try {
+        await tonConnectUI.disconnect();
+        resetInset();
+      } catch (error) {
+        throw error;
+      }
+    }
+
+    async function deposit(senderAddress, destinationAddress, amountInTon, comment, useTon) {
+      var transaction = {}
+      const validUntil = Math.floor(Date.now() / 1000) + 60;
+      const forwardPayload = ton.beginCell()
+        .storeUint(0, 32) // 0 opcode means we have a comment
+        .storeStringTail(comment)
+        .endCell();
+
+      if (useTon) {
+        transaction = {
+          validUntil: validUntil,
+          messages: [
+            {
+              address: destinationAddress,
+              amount: ton.toNano(amountInTon).toString(),
+              payload: forwardPayload.toBoc().toString("base64") // payload with comment in body
+            }
+          ]
+        }
+      } else {
+        const body = ton.beginCell()
+          .storeUint(0xf8a7ea5, 32)                             // jetton transfer op code
+          .storeUint(0, 64)                                     // query_id:uint64
+          .storeCoins(ton.toNano(amountInTon))                  // amount:(VarUInteger 16) -  Jetton amount for transfer (decimals = 6 - jUSDT, 9 - default)
+          .storeAddress(ton.Address.parse(destinationAddress))  // destination:MsgAddress
+          .storeAddress(ton.Address.parse(senderAddress))       // response_destination:MsgAddress
+          .storeBit(0)                                          // custom_payload:(Maybe ^Cell)
+          .storeCoins(ton.toNano(0.01))                         // forward_ton_amount:(VarUInteger 16) - if >0, will send notification message
+          .storeBit(1)                                          // we store forwardPayload as a reference
+          .storeRef(forwardPayload)
+          .endCell();
+        const senderJettonWalletAddress = calcJettonWalletAddress(jettonWalletCode, jettonWalletAddress, senderAddress);
+        console.log("senderAddress", senderAddress);
+        console.log("destinationAddress", destinationAddress);
+        console.log("senderJettonWalletAddress", senderJettonWalletAddress);
+        transaction = {
+          validUntil: validUntil,
+          messages: [
+            {
+              address: senderJettonWalletAddress,       // sender jetton wallet
+              amount: ton.toNano(0.05).toString(),      // for commission fees, excess will be returned
+              payload: body.toBoc().toString("base64")  // payload with jetton transfer body
+            }
+          ]
+        }
+      }
+      try {
+        const result = await tonConnectUI.sendTransaction(transaction);
+        console.log(result)
+        await resetInset();
+      } catch (e) {
+        await resetInset();
+        console.error(e);
+      }
+    }
+
+    // https://docs.ton.org/develop/dapps/cookbook
+    function calcJettonWalletAddress(
+      jettonWalletCode,
+      jettonMasterAddressStr,
+      ownerAddressStr
+    ) {
+      const walletCode = ton.Cell.fromBoc(Buffer.from(jettonWalletCode, "hex"))[0];
+      const masterAddress = ton.Address.parse(jettonMasterAddressStr);
+      const ownerAddress = ton.Address.parse(ownerAddressStr);
+
+      const jettonWalletStateInit = ton.beginCell()
+        .store(
+          ton.storeStateInit({
+            code: walletCode,
+            data: ton.beginCell()
+              .storeCoins(0)
+              .storeAddress(ownerAddress)
+              .storeAddress(masterAddress)
+              .storeRef(walletCode)
+              .endCell(),
+          })
+        )
+        .endCell();
+      const userJettonWalletAddress = new ton.Address(0, jettonWalletStateInit.hash());
+      return userJettonWalletAddress.toString({
+        testOnly: true,
+        bounceable: true,
+      });
+    }
+
+    async function resetInset() {
+      await delay(100);
+      document.body.style.inset = "0px";
+    }
+
+    function delay(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+  </script>
+</body>
+
+</html>
